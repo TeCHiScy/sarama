@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/gzip"
-	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/net/proxy"
 )
 
@@ -506,7 +507,7 @@ type Config struct {
 	// If you want to disable metrics gathering, set "metrics.UseNilMetrics" to "true"
 	// prior to starting Sarama.
 	// See Examples on how to use the metrics registry
-	MetricRegistry metrics.Registry
+	Meter metric.Meter
 }
 
 // NewConfig returns a new configuration instance with sane defaults.
@@ -566,7 +567,7 @@ func NewConfig() *Config {
 	c.ChannelBufferSize = 256
 	c.ApiVersionsRequest = true
 	c.Version = DefaultVersion
-	c.MetricRegistry = metrics.NewRegistry()
+	c.Meter = otel.Meter("")
 
 	return c
 }

@@ -10,7 +10,6 @@ import (
 
 	"github.com/eapache/go-resiliency/breaker"
 	"github.com/eapache/queue"
-	"github.com/rcrowley/go-metrics"
 )
 
 // ErrProducerRetryBufferOverflow is returned when the bridging retry buffer is full and OOM prevention needs to be applied.
@@ -93,7 +92,7 @@ type asyncProducer struct {
 	txnmgr *transactionManager
 	txLock sync.Mutex
 
-	metricsRegistry metrics.Registry
+	metrics *Metrics
 }
 
 // NewAsyncProducer creates a new AsyncProducer using the given broker addresses and configuration.
@@ -126,16 +125,16 @@ func newAsyncProducer(client Client) (AsyncProducer, error) {
 	}
 
 	p := &asyncProducer{
-		client:          client,
-		conf:            client.Config(),
-		errors:          make(chan *ProducerError),
-		input:           make(chan *ProducerMessage),
-		successes:       make(chan *ProducerMessage),
-		retries:         make(chan *ProducerMessage),
-		brokers:         make(map[*Broker]*brokerProducer),
-		brokerRefs:      make(map[*brokerProducer]int),
-		txnmgr:          txnmgr,
-		metricsRegistry: newCleanupRegistry(client.Config().MetricRegistry),
+		client:     client,
+		conf:       client.Config(),
+		errors:     make(chan *ProducerError),
+		input:      make(chan *ProducerMessage),
+		successes:  make(chan *ProducerMessage),
+		retries:    make(chan *ProducerMessage),
+		brokers:    make(map[*Broker]*brokerProducer),
+		brokerRefs: make(map[*brokerProducer]int),
+		txnmgr:     txnmgr,
+		metrics:    realMetrics(client.Config().Meter),
 	}
 
 	// launch our singleton dispatchers
@@ -1273,8 +1272,6 @@ func (p *asyncProducer) shutdown() {
 	close(p.retries)
 	close(p.errors)
 	close(p.successes)
-
-	p.metricsRegistry.UnregisterAll()
 }
 
 func (p *asyncProducer) bumpIdempotentProducerEpoch() {

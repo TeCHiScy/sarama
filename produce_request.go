@@ -1,6 +1,11 @@
 package sarama
 
-import "github.com/rcrowley/go-metrics"
+import (
+	"context"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
 
 // RequiredAcks is used in Produce Requests to tell the broker how many replica acknowledgements
 // it must see before responding. Any of the constants defined here are valid. On broker versions
@@ -28,8 +33,10 @@ type ProduceRequest struct {
 	records         map[string]map[int32]Records
 }
 
-func updateMsgSetMetrics(msgSet *MessageSet, compressionRatioMetric metrics.Histogram,
-	topicCompressionRatioMetric metrics.Histogram,
+func updateMsgSetMetrics(
+	msgSet *MessageSet,
+	compressionRatioMetric metric.Int64Histogram,
+	attributes ...attribute.KeyValue,
 ) int64 {
 	var topicRecordCount int64
 	for _, messageBlock := range msgSet.Messages {
@@ -46,20 +53,20 @@ func updateMsgSetMetrics(msgSet *MessageSet, compressionRatioMetric metrics.Hist
 				float64(messageBlock.Msg.compressedSize)
 			// Histogram do not support decimal values, let's multiple it by 100 for better precision
 			intCompressionRatio := int64(100 * compressionRatio)
-			compressionRatioMetric.Update(intCompressionRatio)
-			topicCompressionRatioMetric.Update(intCompressionRatio)
+			compressionRatioMetric.Record(context.TODO(), intCompressionRatio, metric.WithAttributes(attributes...))
 		}
 	}
 	return topicRecordCount
 }
 
-func updateBatchMetrics(recordBatch *RecordBatch, compressionRatioMetric metrics.Histogram,
-	topicCompressionRatioMetric metrics.Histogram,
+func updateBatchMetrics(
+	recordBatch *RecordBatch,
+	compressionRatioMetric metric.Int64Histogram,
+	attributes ...attribute.KeyValue,
 ) int64 {
 	if recordBatch.compressedRecords != nil {
 		compressionRatio := int64(float64(recordBatch.recordsLen) / float64(len(recordBatch.compressedRecords)) * 100)
-		compressionRatioMetric.Update(compressionRatio)
-		topicCompressionRatioMetric.Update(compressionRatio)
+		compressionRatioMetric.Record(context.TODO(), compressionRatio, metric.WithAttributes(attributes...))
 	}
 
 	return int64(len(recordBatch.Records))
@@ -73,66 +80,43 @@ func (r *ProduceRequest) encode(pe packetEncoder) error {
 	}
 	pe.putInt16(int16(r.RequiredAcks))
 	pe.putInt32(r.Timeout)
-	metricRegistry := pe.metricRegistry()
-	var batchSizeMetric metrics.Histogram
-	var compressionRatioMetric metrics.Histogram
-	if metricRegistry != nil {
-		batchSizeMetric = getOrRegisterHistogram("batch-size", metricRegistry)
-		compressionRatioMetric = getOrRegisterHistogram("compression-ratio", metricRegistry)
-	}
-	totalRecordCount := int64(0)
+	metrics := pe.getMetrics()
 
-	err := pe.putArrayLength(len(r.records))
-	if err != nil {
+	if err := pe.putArrayLength(len(r.records)); err != nil {
 		return err
 	}
 
 	for topic, partitions := range r.records {
-		err = pe.putString(topic)
-		if err != nil {
+		if err := pe.putString(topic); err != nil {
 			return err
 		}
-		err = pe.putArrayLength(len(partitions))
-		if err != nil {
+		if err := pe.putArrayLength(len(partitions)); err != nil {
 			return err
-		}
-		topicRecordCount := int64(0)
-		var topicCompressionRatioMetric metrics.Histogram
-		if metricRegistry != nil {
-			topicCompressionRatioMetric = getOrRegisterTopicHistogram("compression-ratio", topic, metricRegistry)
 		}
 		for id, records := range partitions {
 			startOffset := pe.offset()
 			pe.putInt32(id)
 			pe.push(&lengthField{})
-			err = records.encode(pe)
-			if err != nil {
+			if err := records.encode(pe); err != nil {
 				return err
 			}
-			err = pe.pop()
-			if err != nil {
+			if err := pe.pop(); err != nil {
 				return err
 			}
-			if metricRegistry != nil {
+			if metrics != nil {
+				attributes := metrics.withTopicPartition(topic, id)
+				var recordCount int64
 				if r.Version >= 3 {
-					topicRecordCount += updateBatchMetrics(records.RecordBatch, compressionRatioMetric, topicCompressionRatioMetric)
+					recordCount = updateBatchMetrics(records.RecordBatch, metrics.compressionRatio, attributes...)
 				} else {
-					topicRecordCount += updateMsgSetMetrics(records.MsgSet, compressionRatioMetric, topicCompressionRatioMetric)
+					recordCount = updateMsgSetMetrics(records.MsgSet, metrics.compressionRatio, attributes...)
 				}
 				batchSize := int64(pe.offset() - startOffset)
-				batchSizeMetric.Update(batchSize)
-				getOrRegisterTopicHistogram("batch-size", topic, metricRegistry).Update(batchSize)
+				metrics.batchSize.Record(context.TODO(), batchSize, metric.WithAttributes(attributes...))
+				metrics.recordSends.Add(context.TODO(), recordCount, metric.WithAttributes(attributes...))
+				metrics.recordsPerRequest.Record(context.TODO(), recordCount, metric.WithAttributes(attributes...))
 			}
 		}
-		if topicRecordCount > 0 {
-			getOrRegisterTopicMeter("record-send-rate", topic, metricRegistry).Mark(topicRecordCount)
-			getOrRegisterTopicHistogram("records-per-request", topic, metricRegistry).Update(topicRecordCount)
-			totalRecordCount += topicRecordCount
-		}
-	}
-	if totalRecordCount > 0 {
-		metrics.GetOrRegisterMeter("record-send-rate", metricRegistry).Mark(totalRecordCount)
-		getOrRegisterHistogram("records-per-request", metricRegistry).Update(totalRecordCount)
 	}
 
 	return nil

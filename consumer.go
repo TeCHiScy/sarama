@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -8,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // ConsumerMessage encapsulates a Kafka message returned by the consumer.
@@ -104,7 +105,7 @@ type consumer struct {
 	children        map[string]map[int32]*partitionConsumer
 	brokerConsumers map[*Broker]*brokerConsumer
 	client          Client
-	metricRegistry  metrics.Registry
+	meter           metric.Meter
 	lock            sync.Mutex
 }
 
@@ -137,14 +138,13 @@ func newConsumer(client Client) (Consumer, error) {
 		conf:            client.Config(),
 		children:        make(map[string]map[int32]*partitionConsumer),
 		brokerConsumers: make(map[*Broker]*brokerConsumer),
-		metricRegistry:  newCleanupRegistry(client.Config().MetricRegistry),
+		meter:           client.Config().Meter,
 	}
 
 	return c, nil
 }
 
 func (c *consumer) Close() error {
-	c.metricRegistry.UnregisterAll()
 	return c.client.Close()
 }
 
@@ -683,9 +683,9 @@ func (child *partitionConsumer) parseRecords(batch *RecordBatch) ([]*ConsumerMes
 }
 
 func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*ConsumerMessage, error) {
-	var consumerBatchSizeMetric metrics.Histogram
-	if child.consumer != nil && child.consumer.metricRegistry != nil {
-		consumerBatchSizeMetric = getOrRegisterHistogram("consumer-batch-size", child.consumer.metricRegistry)
+	var consumerBatchSizeMetric metric.Int64Histogram
+	if child.consumer != nil && child.consumer.meter != nil {
+		consumerBatchSizeMetric, _ = child.consumer.meter.Int64Histogram("consumer-batch-size")
 	}
 
 	// If request was throttled and empty we log and return without error
@@ -711,7 +711,7 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 	}
 
 	if consumerBatchSizeMetric != nil {
-		consumerBatchSizeMetric.Update(int64(nRecs))
+		consumerBatchSizeMetric.Record(context.Background(), int64(nRecs))
 	}
 
 	if block.PreferredReadReplica != invalidPreferredReplicaID {
