@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // ErrClosedConsumerGroup is the error returned when a method is called on a consumer group that has been closed.
@@ -93,7 +93,7 @@ type consumerGroup struct {
 
 	userData []byte
 
-	metricRegistry metrics.Registry
+	meter metric.Meter
 }
 
 // NewConsumerGroup creates a new consumer group the given broker addresses and configuration.
@@ -135,14 +135,14 @@ func newConsumerGroup(groupID string, client Client) (ConsumerGroup, error) {
 	}
 
 	cg := &consumerGroup{
-		client:         client,
-		consumer:       consumer,
-		config:         config,
-		groupID:        groupID,
-		errors:         make(chan error, config.ChannelBufferSize),
-		closed:         make(chan none),
-		userData:       config.Consumer.Group.Member.UserData,
-		metricRegistry: newCleanupRegistry(config.MetricRegistry),
+		client:   client,
+		consumer: consumer,
+		config:   config,
+		groupID:  groupID,
+		errors:   make(chan error, config.ChannelBufferSize),
+		closed:   make(chan none),
+		userData: config.Consumer.Group.Member.UserData,
+		meter:    config.Meter,
 	}
 	if config.Consumer.Group.InstanceId != "" && config.Version.IsAtLeast(V2_3_0_0) {
 		cg.groupInstanceId = &config.Consumer.Group.InstanceId
@@ -177,8 +177,6 @@ func (c *consumerGroup) Close() (err error) {
 		if e := c.client.Close(); e != nil {
 			err = e
 		}
-
-		c.metricRegistry.UnregisterAll()
 	})
 	return
 }
@@ -279,35 +277,34 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 	}
 
 	var (
-		metricRegistry          = c.metricRegistry
-		consumerGroupJoinTotal  metrics.Counter
-		consumerGroupJoinFailed metrics.Counter
-		consumerGroupSyncTotal  metrics.Counter
-		consumerGroupSyncFailed metrics.Counter
+		consumerGroupJoinTotal  metric.Float64Counter
+		consumerGroupJoinFailed metric.Float64Counter
+		consumerGroupSyncTotal  metric.Float64Counter
+		consumerGroupSyncFailed metric.Float64Counter
 	)
 
-	if metricRegistry != nil {
-		consumerGroupJoinTotal = metrics.GetOrRegisterCounter(fmt.Sprintf("consumer-group-join-total-%s", c.groupID), metricRegistry)
-		consumerGroupJoinFailed = metrics.GetOrRegisterCounter(fmt.Sprintf("consumer-group-join-failed-%s", c.groupID), metricRegistry)
-		consumerGroupSyncTotal = metrics.GetOrRegisterCounter(fmt.Sprintf("consumer-group-sync-total-%s", c.groupID), metricRegistry)
-		consumerGroupSyncFailed = metrics.GetOrRegisterCounter(fmt.Sprintf("consumer-group-sync-failed-%s", c.groupID), metricRegistry)
+	if c.meter != nil {
+		consumerGroupJoinTotal, _ = c.meter.Float64Counter(fmt.Sprintf("consumer-group-join-total-%s", c.groupID))
+		consumerGroupJoinFailed, _ = c.meter.Float64Counter(fmt.Sprintf("consumer-group-join-failed-%s", c.groupID))
+		consumerGroupSyncTotal, _ = c.meter.Float64Counter(fmt.Sprintf("consumer-group-sync-total-%s", c.groupID))
+		consumerGroupSyncFailed, _ = c.meter.Float64Counter(fmt.Sprintf("consumer-group-sync-failed-%s", c.groupID))
 	}
 
 	// Join consumer group
 	join, err := c.joinGroupRequest(coordinator, topics)
 	if consumerGroupJoinTotal != nil {
-		consumerGroupJoinTotal.Inc(1)
+		consumerGroupJoinTotal.Add(ctx, 1)
 	}
 	if err != nil {
 		_ = coordinator.Close()
 		if consumerGroupJoinFailed != nil {
-			consumerGroupJoinFailed.Inc(1)
+			consumerGroupJoinFailed.Add(ctx, 1)
 		}
 		return nil, err
 	}
 	if !errors.Is(join.Err, ErrNoError) {
 		if consumerGroupJoinFailed != nil {
-			consumerGroupJoinFailed.Inc(1)
+			consumerGroupJoinFailed.Add(ctx, 1)
 		}
 	}
 	switch join.Err {
@@ -370,18 +367,18 @@ func (c *consumerGroup) newSession(ctx context.Context, topics []string, handler
 	// Sync consumer group
 	syncGroupResponse, err := c.syncGroupRequest(coordinator, members, plan, join.GenerationId, strategy)
 	if consumerGroupSyncTotal != nil {
-		consumerGroupSyncTotal.Inc(1)
+		consumerGroupSyncTotal.Add(ctx, 1)
 	}
 	if err != nil {
 		_ = coordinator.Close()
 		if consumerGroupSyncFailed != nil {
-			consumerGroupSyncFailed.Inc(1)
+			consumerGroupSyncFailed.Add(ctx, 1)
 		}
 		return nil, err
 	}
 	if !errors.Is(syncGroupResponse.Err, ErrNoError) {
 		if consumerGroupSyncFailed != nil {
-			consumerGroupSyncFailed.Inc(1)
+			consumerGroupSyncFailed.Add(ctx, 1)
 		}
 	}
 

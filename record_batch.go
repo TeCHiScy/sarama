@@ -196,13 +196,11 @@ func (b *RecordBatch) decode(pd packetDecoder) (err error) {
 }
 
 func (b *RecordBatch) encodeRecords(pe packetEncoder) error {
-	var raw []byte
-	var err error
-	if raw, err = encode(recordsArray(b.Records), pe.metricRegistry()); err != nil {
+	raw, err := encode(recordsArray(b.Records), pe.getMetrics())
+	if err != nil {
 		return err
 	}
 	b.recordsLen = len(raw)
-
 	b.compressedRecords, err = compress(b.Codec, b.CompressionLevel, raw)
 	return err
 }
