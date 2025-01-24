@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -15,7 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Broker represents a single Kafka broker connection. All operations on this object are entirely concurrency-safe.
@@ -33,34 +35,13 @@ type Broker struct {
 	responses     chan *responsePromise
 	done          chan bool
 
-	metricRegistry             metrics.Registry
-	incomingByteRate           metrics.Meter
-	requestRate                metrics.Meter
-	fetchRate                  metrics.Meter
-	requestSize                metrics.Histogram
-	requestLatency             metrics.Histogram
-	outgoingByteRate           metrics.Meter
-	responseRate               metrics.Meter
-	responseSize               metrics.Histogram
-	requestsInFlight           metrics.Counter
-	protocolRequestsRate       map[int16]metrics.Meter
-	brokerIncomingByteRate     metrics.Meter
-	brokerRequestRate          metrics.Meter
-	brokerFetchRate            metrics.Meter
-	brokerRequestSize          metrics.Histogram
-	brokerRequestLatency       metrics.Histogram
-	brokerOutgoingByteRate     metrics.Meter
-	brokerResponseRate         metrics.Meter
-	brokerResponseSize         metrics.Histogram
-	brokerRequestsInFlight     metrics.Counter
-	brokerThrottleTime         metrics.Histogram
-	brokerProtocolRequestsRate map[int16]metrics.Meter
-
 	kerberosAuthenticator               GSSAPIKerberosAuth
 	clientSessionReauthenticationTimeMs int64
 
 	throttleTimer     *time.Timer
 	throttleTimerLock sync.Mutex
+
+	metrics *Metrics
 }
 
 // SASLMechanism specifies the SASL mechanism the client uses to authenticate with the broker
@@ -178,8 +159,8 @@ func (b *Broker) Open(conf *Config) error {
 
 	b.lock.Lock()
 
-	if b.metricRegistry == nil {
-		b.metricRegistry = newCleanupRegistry(conf.MetricRegistry)
+	if b.metrics == nil {
+		b.metrics = realMetrics(conf.Meter)
 	}
 
 	go withRecover(func() {
@@ -215,21 +196,11 @@ func (b *Broker) Open(conf *Config) error {
 		b.conn = newBufConn(b.conn)
 		b.conf = conf
 
-		// Create or reuse the global metrics shared between brokers
-		b.incomingByteRate = metrics.GetOrRegisterMeter("incoming-byte-rate", b.metricRegistry)
-		b.requestRate = metrics.GetOrRegisterMeter("request-rate", b.metricRegistry)
-		b.fetchRate = metrics.GetOrRegisterMeter("consumer-fetch-rate", b.metricRegistry)
-		b.requestSize = getOrRegisterHistogram("request-size", b.metricRegistry)
-		b.requestLatency = getOrRegisterHistogram("request-latency-in-ms", b.metricRegistry)
-		b.outgoingByteRate = metrics.GetOrRegisterMeter("outgoing-byte-rate", b.metricRegistry)
-		b.responseRate = metrics.GetOrRegisterMeter("response-rate", b.metricRegistry)
-		b.responseSize = getOrRegisterHistogram("response-size", b.metricRegistry)
-		b.requestsInFlight = metrics.GetOrRegisterCounter("requests-in-flight", b.metricRegistry)
-		b.protocolRequestsRate = map[int16]metrics.Meter{}
-		// Do not gather metrics for seeded broker (only used during bootstrap) because they share
-		// the same id (-1) and are already exposed through the global metrics above
-		if b.id >= 0 && !metrics.UseNilMetrics {
-			b.registerMetrics()
+		if b.metrics != nil && b.id >= 0 {
+			// Create or reuse the global metrics shared between brokers
+			// Do not gather metrics for seeded broker (only used during bootstrap) because they share
+			// the same id (-1) and are already exposed through the global metrics above
+			b.metrics.attributes = append(b.metrics.attributes, brokerAttributes(b)...)
 		}
 
 		if conf.Net.SASL.Mechanism == SASLTypeOAuth && conf.Net.SASL.Version == SASLHandshakeV0 {
@@ -335,8 +306,6 @@ func (b *Broker) Close() error {
 	b.connErr = nil
 	b.done = nil
 	b.responses = nil
-
-	b.metricRegistry.UnregisterAll()
 
 	if err == nil {
 		DebugLogger.Printf("Closed connection to broker %s\n", b.addr)
@@ -444,8 +413,6 @@ func (b *Broker) AsyncProduce(request *ProduceRequest, cb ProduceCallback) error
 	var promise *responsePromise
 
 	if needAcks {
-		metricRegistry := b.metricRegistry
-
 		// Create ProduceResponse early to provide the header version
 		res := new(ProduceResponse)
 		promise = &responsePromise{
@@ -458,7 +425,7 @@ func (b *Broker) AsyncProduce(request *ProduceRequest, cb ProduceCallback) error
 					return
 				}
 
-				if err := versionedDecode(packets, res, request.version(), metricRegistry); err != nil {
+				if err := versionedDecode(packets, res, request.version(), b.metrics); err != nil {
 					// Malformed response
 					cb(nil, err)
 					return
@@ -498,11 +465,8 @@ func (b *Broker) Produce(request *ProduceRequest) (*ProduceResponse, error) {
 // Fetch returns a FetchResponse or error
 func (b *Broker) Fetch(request *FetchRequest) (*FetchResponse, error) {
 	defer func() {
-		if b.fetchRate != nil {
-			b.fetchRate.Mark(1)
-		}
-		if b.brokerFetchRate != nil {
-			b.brokerFetchRate.Mark(1)
+		if b.metrics != nil {
+			b.metrics.consumerFetchs.Add(context.TODO(), 1, metric.WithAttributes(b.metrics.attributes...))
 		}
 	}()
 
@@ -1014,7 +978,7 @@ func (b *Broker) sendInternal(rb protocolBody, promise *responsePromise) error {
 	}
 
 	req := &request{correlationID: b.correlationID, clientID: b.conf.ClientID, body: rb}
-	buf, err := encode(req, b.metricRegistry)
+	buf, err := encode(req, b.metrics)
 	if err != nil {
 		return err
 	}
@@ -1064,7 +1028,7 @@ func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
 		return nil
 	}
 
-	err = handleResponsePromise(req, res, promise, b.metricRegistry)
+	err = handleResponsePromise(req, res, promise, b.metrics)
 	if err != nil {
 		return err
 	}
@@ -1074,10 +1038,10 @@ func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
 	return nil
 }
 
-func handleResponsePromise(req protocolBody, res protocolBody, promise *responsePromise, metricRegistry metrics.Registry) error {
+func handleResponsePromise(req protocolBody, res protocolBody, promise *responsePromise, metrics *Metrics) error {
 	select {
 	case buf := <-promise.packets:
-		return versionedDecode(buf, res, req.version(), metricRegistry)
+		return versionedDecode(buf, res, req.version(), metrics)
 	case err := <-promise.errors:
 		return err
 	}
@@ -1195,7 +1159,7 @@ func (b *Broker) responseReceiver() {
 		}
 
 		decodedHeader := responseHeader{}
-		err = versionedDecode(header, &decodedHeader, response.headerVersion, b.metricRegistry)
+		err = versionedDecode(header, &decodedHeader, response.headerVersion, b.metrics)
 		if err != nil {
 			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
 			dead = err
@@ -1246,7 +1210,7 @@ func (b *Broker) authenticateViaSASLv0() error {
 }
 
 func (b *Broker) authenticateViaSASLv1() error {
-	metricRegistry := b.metricRegistry
+	metrics := b.metrics
 	if b.conf.Net.SASL.Handshake {
 		handshakeRequest := &SaslHandshakeRequest{Mechanism: string(b.conf.Net.SASL.Mechanism), Version: b.conf.Net.SASL.Version}
 		handshakeResponse := new(SaslHandshakeResponse)
@@ -1257,7 +1221,7 @@ func (b *Broker) authenticateViaSASLv1() error {
 			Logger.Printf("Error while performing SASL handshake %s: %s\n", b.addr, handshakeErr)
 			return handshakeErr
 		}
-		handshakeErr = handleResponsePromise(handshakeRequest, handshakeResponse, prom, metricRegistry)
+		handshakeErr = handleResponsePromise(handshakeRequest, handshakeResponse, prom, metrics)
 		if handshakeErr != nil {
 			Logger.Printf("Error while handling SASL handshake response %s: %s\n", b.addr, handshakeErr)
 			return handshakeErr
@@ -1277,7 +1241,7 @@ func (b *Broker) authenticateViaSASLv1() error {
 			Logger.Printf("Error while performing SASL Auth %s\n", b.addr)
 			return nil, authErr
 		}
-		authErr = handleResponsePromise(authenticateRequest, authenticateResponse, prom, metricRegistry)
+		authErr = handleResponsePromise(authenticateRequest, authenticateResponse, prom, metrics)
 		if authErr != nil {
 			Logger.Printf("Error while performing SASL Auth %s: %s\n", b.addr, authErr)
 			return nil, authErr
@@ -1318,7 +1282,7 @@ func (b *Broker) sendAndReceiveSASLHandshake(saslType SASLMechanism, version int
 	rb := &SaslHandshakeRequest{Mechanism: string(saslType), Version: version}
 
 	req := &request{correlationID: b.correlationID, clientID: b.conf.ClientID, body: rb}
-	buf, err := encode(req, b.metricRegistry)
+	buf, err := encode(req, b.metrics)
 	if err != nil {
 		return err
 	}
@@ -1355,7 +1319,7 @@ func (b *Broker) sendAndReceiveSASLHandshake(saslType SASLMechanism, version int
 	b.updateIncomingCommunicationMetrics(n+8, time.Since(requestTime))
 	res := &SaslHandshakeResponse{}
 
-	err = versionedDecode(payload, res, 0, b.metricRegistry)
+	err = versionedDecode(payload, res, 0, b.metrics)
 	if err != nil {
 		Logger.Printf("Failed to parse SASL handshake : %s\n", err.Error())
 		return err
@@ -1619,76 +1583,33 @@ func (b *Broker) computeSaslSessionLifetime(res *SaslAuthenticateResponse) {
 
 func (b *Broker) updateIncomingCommunicationMetrics(bytes int, requestLatency time.Duration) {
 	b.updateRequestLatencyAndInFlightMetrics(requestLatency)
-	b.responseRate.Mark(1)
+	b.metrics.responses.Add(context.TODO(), 1, metric.WithAttributes(b.metrics.attributes...))
 
-	if b.brokerResponseRate != nil {
-		b.brokerResponseRate.Mark(1)
-	}
-
-	responseSize := int64(bytes)
-	b.incomingByteRate.Mark(responseSize)
-	if b.brokerIncomingByteRate != nil {
-		b.brokerIncomingByteRate.Mark(responseSize)
-	}
-
-	b.responseSize.Update(responseSize)
-	if b.brokerResponseSize != nil {
-		b.brokerResponseSize.Update(responseSize)
-	}
+	size := int64(bytes)
+	b.metrics.incomingBytes.Add(context.TODO(), size, metric.WithAttributes(b.metrics.attributes...))
+	b.metrics.responseSize.Record(context.TODO(), size, metric.WithAttributes(b.metrics.attributes...))
 }
 
-func (b *Broker) updateRequestLatencyAndInFlightMetrics(requestLatency time.Duration) {
-	requestLatencyInMs := int64(requestLatency / time.Millisecond)
-	b.requestLatency.Update(requestLatencyInMs)
-
-	if b.brokerRequestLatency != nil {
-		b.brokerRequestLatency.Update(requestLatencyInMs)
-	}
-
+func (b *Broker) updateRequestLatencyAndInFlightMetrics(latency time.Duration) {
+	b.metrics.requestLatency.Record(context.TODO(), latency.Milliseconds(), metric.WithAttributes(b.metrics.attributes...))
 	b.addRequestInFlightMetrics(-1)
 }
 
 func (b *Broker) addRequestInFlightMetrics(i int64) {
-	b.requestsInFlight.Inc(i)
-	if b.brokerRequestsInFlight != nil {
-		b.brokerRequestsInFlight.Inc(i)
-	}
+	b.metrics.requestsInFlight.Add(context.TODO(), i, metric.WithAttributes(b.metrics.attributes...))
 }
 
 func (b *Broker) updateOutgoingCommunicationMetrics(bytes int) {
-	b.requestRate.Mark(1)
-	if b.brokerRequestRate != nil {
-		b.brokerRequestRate.Mark(1)
-	}
+	b.metrics.requests.Add(context.TODO(), 1, metric.WithAttributes(b.metrics.attributes...))
 
-	requestSize := int64(bytes)
-	b.outgoingByteRate.Mark(requestSize)
-	if b.brokerOutgoingByteRate != nil {
-		b.brokerOutgoingByteRate.Mark(requestSize)
-	}
-
-	b.requestSize.Update(requestSize)
-	if b.brokerRequestSize != nil {
-		b.brokerRequestSize.Update(requestSize)
-	}
+	size := int64(bytes)
+	b.metrics.outgoingBytes.Add(context.TODO(), size, metric.WithAttributes(b.metrics.attributes...))
+	b.metrics.requestSize.Record(context.TODO(), size, metric.WithAttributes(b.metrics.attributes...))
 }
 
 func (b *Broker) updateProtocolMetrics(rb protocolBody) {
-	protocolRequestsRate := b.protocolRequestsRate[rb.key()]
-	if protocolRequestsRate == nil {
-		protocolRequestsRate = metrics.GetOrRegisterMeter(fmt.Sprintf("protocol-requests-rate-%d", rb.key()), b.metricRegistry)
-		b.protocolRequestsRate[rb.key()] = protocolRequestsRate
-	}
-	protocolRequestsRate.Mark(1)
-
-	if b.brokerProtocolRequestsRate != nil {
-		brokerProtocolRequestsRate := b.brokerProtocolRequestsRate[rb.key()]
-		if brokerProtocolRequestsRate == nil {
-			brokerProtocolRequestsRate = b.registerMeter(fmt.Sprintf("protocol-requests-rate-%d", rb.key()))
-			b.brokerProtocolRequestsRate[rb.key()] = brokerProtocolRequestsRate
-		}
-		brokerProtocolRequestsRate.Mark(1)
-	}
+	attributes := append([]attribute.KeyValue{attribute.Int64("key", int64(rb.key()))}, b.metrics.attributes...)
+	b.metrics.protocolRequests.Add(context.TODO(), 1, metric.WithAttributes(attributes...))
 }
 
 type throttleSupport interface {
@@ -1733,39 +1654,9 @@ func (b *Broker) waitIfThrottled() {
 }
 
 func (b *Broker) updateThrottleMetric(throttleTime time.Duration) {
-	if b.brokerThrottleTime != nil {
-		throttleTimeInMs := int64(throttleTime / time.Millisecond)
-		b.brokerThrottleTime.Update(throttleTimeInMs)
+	if b.metrics != nil {
+		b.metrics.throttleTime.Record(context.TODO(), throttleTime.Milliseconds(), metric.WithAttributes(b.metrics.attributes...))
 	}
-}
-
-func (b *Broker) registerMetrics() {
-	b.brokerIncomingByteRate = b.registerMeter("incoming-byte-rate")
-	b.brokerRequestRate = b.registerMeter("request-rate")
-	b.brokerFetchRate = b.registerMeter("consumer-fetch-rate")
-	b.brokerRequestSize = b.registerHistogram("request-size")
-	b.brokerRequestLatency = b.registerHistogram("request-latency-in-ms")
-	b.brokerOutgoingByteRate = b.registerMeter("outgoing-byte-rate")
-	b.brokerResponseRate = b.registerMeter("response-rate")
-	b.brokerResponseSize = b.registerHistogram("response-size")
-	b.brokerRequestsInFlight = b.registerCounter("requests-in-flight")
-	b.brokerThrottleTime = b.registerHistogram("throttle-time-in-ms")
-	b.brokerProtocolRequestsRate = map[int16]metrics.Meter{}
-}
-
-func (b *Broker) registerMeter(name string) metrics.Meter {
-	nameForBroker := getMetricNameForBroker(name, b)
-	return metrics.GetOrRegisterMeter(nameForBroker, b.metricRegistry)
-}
-
-func (b *Broker) registerHistogram(name string) metrics.Histogram {
-	nameForBroker := getMetricNameForBroker(name, b)
-	return getOrRegisterHistogram(nameForBroker, b.metricRegistry)
-}
-
-func (b *Broker) registerCounter(name string) metrics.Counter {
-	nameForBroker := getMetricNameForBroker(name, b)
-	return metrics.GetOrRegisterCounter(nameForBroker, b.metricRegistry)
 }
 
 func validServerNameTLS(addr string, cfg *tls.Config) *tls.Config {

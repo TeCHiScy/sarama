@@ -1,6 +1,11 @@
 package sarama
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+
+	"go.opentelemetry.io/otel/metric"
+)
 
 type fetchRequestBlock struct {
 	Version int16
@@ -97,8 +102,6 @@ const (
 )
 
 func (r *FetchRequest) encode(pe packetEncoder) (err error) {
-	metricRegistry := pe.metricRegistry()
-
 	pe.putInt32(-1) // ReplicaID is always -1 for clients
 	pe.putInt32(r.MaxWaitTime)
 	pe.putInt32(r.MinBytes)
@@ -112,27 +115,26 @@ func (r *FetchRequest) encode(pe packetEncoder) (err error) {
 		pe.putInt32(r.SessionID)
 		pe.putInt32(r.SessionEpoch)
 	}
-	err = pe.putArrayLength(len(r.blocks))
-	if err != nil {
+	if err := pe.putArrayLength(len(r.blocks)); err != nil {
 		return err
 	}
+	metrics := pe.getMetrics()
 	for topic, blocks := range r.blocks {
-		err = pe.putString(topic)
-		if err != nil {
+		if err := pe.putString(topic); err != nil {
 			return err
 		}
-		err = pe.putArrayLength(len(blocks))
-		if err != nil {
+		if err := pe.putArrayLength(len(blocks)); err != nil {
 			return err
 		}
 		for partition, block := range blocks {
 			pe.putInt32(partition)
-			err = block.encode(pe, r.Version)
-			if err != nil {
+			if err := block.encode(pe, r.Version); err != nil {
 				return err
 			}
 		}
-		getOrRegisterTopicMeter("consumer-fetch-rate", topic, metricRegistry).Mark(1)
+		if metrics != nil {
+			metrics.consumerFetchs.Add(context.TODO(), 1, metric.WithAttributes(metrics.withTopic(topic)...))
+		}
 	}
 	if r.Version >= 7 {
 		err = pe.putArrayLength(len(r.forgotten))

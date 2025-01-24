@@ -2,8 +2,6 @@ package sarama
 
 import (
 	"fmt"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 // Encoder is the interface that wraps the basic Encode method.
@@ -18,7 +16,7 @@ type encoderWithHeader interface {
 }
 
 // Encode takes an Encoder and turns it into bytes while potentially recording metrics.
-func encode(e encoder, metricRegistry metrics.Registry) ([]byte, error) {
+func encode(e encoder, metrics *Metrics) ([]byte, error) {
 	if e == nil {
 		return nil, nil
 	}
@@ -26,8 +24,7 @@ func encode(e encoder, metricRegistry metrics.Registry) ([]byte, error) {
 	var prepEnc prepEncoder
 	var realEnc realEncoder
 
-	err := e.encode(&prepEnc)
-	if err != nil {
+	if err := e.encode(&prepEnc); err != nil {
 		return nil, err
 	}
 
@@ -36,9 +33,8 @@ func encode(e encoder, metricRegistry metrics.Registry) ([]byte, error) {
 	}
 
 	realEnc.raw = make([]byte, prepEnc.length)
-	realEnc.registry = metricRegistry
-	err = e.encode(&realEnc)
-	if err != nil {
+	realEnc.metrics = metrics
+	if err := e.encode(&realEnc); err != nil {
 		return nil, err
 	}
 
@@ -57,17 +53,16 @@ type versionedDecoder interface {
 
 // decode takes bytes and a decoder and fills the fields of the decoder from the bytes,
 // interpreted using Kafka's encoding rules.
-func decode(buf []byte, in decoder, metricRegistry metrics.Registry) error {
+func decode(buf []byte, in decoder, metrics *Metrics) error {
 	if buf == nil {
 		return nil
 	}
 
 	helper := realDecoder{
-		raw:      buf,
-		registry: metricRegistry,
+		raw:     buf,
+		metrics: metrics,
 	}
-	err := in.decode(&helper)
-	if err != nil {
+	if err := in.decode(&helper); err != nil {
 		return err
 	}
 
@@ -78,17 +73,16 @@ func decode(buf []byte, in decoder, metricRegistry metrics.Registry) error {
 	return nil
 }
 
-func versionedDecode(buf []byte, in versionedDecoder, version int16, metricRegistry metrics.Registry) error {
+func versionedDecode(buf []byte, in versionedDecoder, version int16, metrics *Metrics) error {
 	if buf == nil {
 		return nil
 	}
 
 	helper := realDecoder{
-		raw:      buf,
-		registry: metricRegistry,
+		raw:     buf,
+		metrics: metrics,
 	}
-	err := in.decode(&helper, version)
-	if err != nil {
+	if err := in.decode(&helper, version); err != nil {
 		return err
 	}
 
