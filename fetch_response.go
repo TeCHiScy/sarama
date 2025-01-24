@@ -1,11 +1,12 @@
 package sarama
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -68,12 +69,6 @@ type FetchResponseBlock struct {
 }
 
 func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error) {
-	metricRegistry := pd.metricRegistry()
-	var sizeMetric metrics.Histogram
-	if metricRegistry != nil {
-		sizeMetric = getOrRegisterHistogram("consumer-fetch-response-size", metricRegistry)
-	}
-
 	b.Err, err = pd.getKError()
 	if err != nil {
 		return err
@@ -128,8 +123,10 @@ func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error)
 	if err != nil {
 		return err
 	}
-	if sizeMetric != nil {
-		sizeMetric.Update(int64(recordsSize))
+
+	metrics := pd.getMetrics()
+	if metrics != nil {
+		metrics.consumerFetchResponseSize.Record(context.TODO(), int64(recordsSize), metric.WithAttributes(metrics.attributes...))
 	}
 
 	recordsDecoder, err := pd.getSubset(int(recordsSize))

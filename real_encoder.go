@@ -5,15 +5,13 @@ import (
 	"errors"
 	"math"
 	"time"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 type realEncoder struct {
-	raw      []byte
-	off      int
-	stack    []pushEncoder
-	registry metrics.Registry
+	raw     []byte
+	off     int
+	stack   []pushEncoder
+	metrics *Metrics
 }
 
 type realFlexibleEncoder struct {
@@ -193,8 +191,8 @@ func (re *realEncoder) pop() error {
 }
 
 // we do record metrics during the real encoder pass
-func (re *realEncoder) metricRegistry() metrics.Registry {
-	return re.registry
+func (re *realEncoder) getMetrics() *Metrics {
+	return re.metrics
 }
 
 func (re *realFlexibleEncoder) putArrayLength(in int) error {

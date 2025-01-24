@@ -10,7 +10,6 @@ import (
 
 	"github.com/eapache/go-resiliency/breaker"
 	"github.com/eapache/queue"
-	"github.com/rcrowley/go-metrics"
 )
 
 // ErrProducerRetryBufferOverflow is returned when the bridging retry buffer is full and OOM prevention needs to be applied.
@@ -104,7 +103,7 @@ type asyncProducer struct {
 	// mirroring Kafka's RecordAccumulator.
 	muter *partitionMuter
 
-	metricsRegistry metrics.Registry
+	metrics *Metrics
 }
 
 type partitionMuter struct {
@@ -297,17 +296,17 @@ func newAsyncProducer(client Client) (AsyncProducer, error) {
 	}
 
 	p := &asyncProducer{
-		client:          client,
-		conf:            client.Config(),
-		errors:          make(chan *ProducerError),
-		input:           make(chan *ProducerMessage),
-		successes:       make(chan *ProducerMessage),
-		retries:         make(chan *ProducerMessage),
-		brokers:         make(map[*Broker]*brokerProducer),
-		brokerRefs:      make(map[*brokerProducer]int),
-		txnmgr:          txnmgr,
-		muter:           newPartitionMuter(),
-		metricsRegistry: newCleanupRegistry(client.Config().MetricRegistry),
+		client:     client,
+		conf:       client.Config(),
+		errors:     make(chan *ProducerError),
+		input:      make(chan *ProducerMessage),
+		successes:  make(chan *ProducerMessage),
+		retries:    make(chan *ProducerMessage),
+		brokers:    make(map[*Broker]*brokerProducer),
+		brokerRefs: make(map[*brokerProducer]int),
+		txnmgr:     txnmgr,
+		muter:      newPartitionMuter(),
+		metrics:    realMetrics(client.Config().Meter),
 	}
 
 	// launch our singleton dispatchers
@@ -1620,8 +1619,6 @@ func (p *asyncProducer) shutdown() {
 	close(p.retries)
 	close(p.errors)
 	close(p.successes)
-
-	p.metricsRegistry.UnregisterAll()
 }
 
 func (p *asyncProducer) bumpIdempotentProducerEpoch() {

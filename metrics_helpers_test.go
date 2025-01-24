@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rcrowley/go-metrics"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Common type and functions for metric validation
@@ -36,7 +37,7 @@ func (m *metricValidators) registerForAllBrokers(broker *Broker, validator *metr
 	m.registerForBroker(broker, validator)
 }
 
-func (m metricValidators) run(t *testing.T, r metrics.Registry) {
+func (m metricValidators) run(t *testing.T, r metric.Meter) {
 	t.Helper()
 	for _, metricValidator := range m {
 		metric := r.Get(metricValidator.name)

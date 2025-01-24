@@ -2275,7 +2275,6 @@ func TestConsumerAbortNoGoroutineLeak(t *testing.T) {
 			conf:            config,
 			children:        make(map[string]map[int32]*partitionConsumer),
 			brokerConsumers: make(map[*Broker]*brokerConsumer),
-			metricRegistry:  newCleanupRegistry(config.MetricRegistry),
 		}
 		child.consumer = c
 
@@ -2335,7 +2334,6 @@ func TestConsumerAbortNoGoroutineLeak(t *testing.T) {
 			conf:            config,
 			children:        make(map[string]map[int32]*partitionConsumer),
 			brokerConsumers: make(map[*Broker]*brokerConsumer),
-			metricRegistry:  newCleanupRegistry(config.MetricRegistry),
 		}
 
 		// Start the dispatcher goroutine (it will block on <-child.trigger).

@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1439,31 +1438,6 @@ func TestInitProducerIDConnectionRefused(t *testing.T) {
 	}
 
 	safeClose(t, client)
-}
-
-func TestMetricsCleanup(t *testing.T) {
-	seedBroker := NewMockBroker(t, 1)
-	defer seedBroker.Close()
-	metadataResponse := new(MetadataResponse)
-	metadataResponse.AddBroker(seedBroker.Addr(), seedBroker.BrokerID())
-	seedBroker.Returns(metadataResponse)
-
-	config := NewTestConfig()
-	metrics.GetOrRegisterMeter("a", config.MetricRegistry)
-
-	client, err := NewClient([]string{seedBroker.Addr()}, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	safeClose(t, client)
-
-	// Wait async close
-	time.Sleep(10 * time.Millisecond)
-
-	all := config.MetricRegistry.GetAll()
-	if len(all) != 1 || all["a"] == nil {
-		t.Errorf("excepted 1 metric, found: %v", all)
-	}
 }
 
 func TestUpdateBroker(t *testing.T) {

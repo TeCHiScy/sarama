@@ -2,8 +2,6 @@ package sarama
 
 import (
 	"time"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 type taggedFieldDecoderFunc func(pd packetDecoder) error
@@ -49,7 +47,7 @@ type packetDecoder interface {
 	pop() error
 
 	// To record metrics when provided
-	metricRegistry() metrics.Registry
+	getMetrics() *Metrics
 }
 
 // PushDecoder is the interface for decoding fields like CRCs and lengths where the validity

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"math"
 	"time"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 type prepEncoder struct {
@@ -187,7 +185,7 @@ func (pe *prepEncoder) pop() error {
 }
 
 // we do not record metrics during the prep encoder pass
-func (pe *prepEncoder) metricRegistry() metrics.Registry {
+func (pe *prepEncoder) getMetrics() *Metrics {
 	return nil
 }
 

@@ -4,8 +4,6 @@ import (
 	"encoding/binary"
 	"math"
 	"time"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 var (
@@ -18,10 +16,10 @@ var (
 )
 
 type realDecoder struct {
-	raw      []byte
-	off      int
-	stack    []pushDecoder
-	registry metrics.Registry
+	raw     []byte
+	off     int
+	stack   []pushDecoder
+	metrics *Metrics
 }
 
 type realFlexibleDecoder struct {
@@ -368,8 +366,8 @@ func (rd *realDecoder) pop() error {
 	return in.check(rd.off, rd.raw)
 }
 
-func (rd *realDecoder) metricRegistry() metrics.Registry {
-	return rd.registry
+func (rd *realDecoder) getMetrics() *Metrics {
+	return rd.metrics
 }
 
 func (rd *realFlexibleDecoder) getArrayLength() (int, error) {

@@ -2,8 +2,6 @@ package sarama
 
 import (
 	"time"
-
-	"github.com/rcrowley/go-metrics"
 )
 
 // PacketEncoder is the interface providing helpers for writing with Kafka's encoding rules.
@@ -43,7 +41,7 @@ type packetEncoder interface {
 	pop() error
 
 	// To record metrics when provided
-	metricRegistry() metrics.Registry
+	getMetrics() *Metrics
 }
 
 // PushEncoder is the interface for encoding fields like CRCs and lengths where the value
