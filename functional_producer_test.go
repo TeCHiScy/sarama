@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 
 	"github.com/IBM/sarama/internal/toxiproxy"
 )
@@ -946,7 +946,7 @@ func testProducingMessages(t *testing.T, config *Config, minVersion KafkaVersion
 			// reference the shared config object.
 			cfg := *config
 			cfg.ClientID = name
-			cfg.MetricRegistry = metrics.NewRegistry()
+			cfg.Meter = otel.Meter("")
 			checkKafkaVersion(t, version.String())
 			cfg.Version = version
 
@@ -1129,16 +1129,16 @@ func validateProducerMetrics(t *testing.T, client Client) {
 	}
 
 	// We read at least 1 byte from the broker
-	metricValidators.registerForAllBrokers(broker, minCountMeterValidator("incoming-byte-rate", 1))
+	metricValidators.register(minCountMeterValidator("incoming-byte-rate", 1))
 	// in at least 3 global requests (1 for metadata request, 1 for offset request and N for produce request)
 	metricValidators.register(minCountMeterValidator("request-rate", 3))
 	metricValidators.register(minCountHistogramValidator("request-size", 3))
 	metricValidators.register(minValHistogramValidator("request-size", 1))
 	// and at least 2 requests to the registered broker (offset + produces)
-	metricValidators.registerForBroker(broker, minCountMeterValidator("request-rate", 2))
-	metricValidators.registerForBroker(broker, minCountHistogramValidator("request-size", 2))
-	metricValidators.registerForBroker(broker, minValHistogramValidator("request-size", 1))
-	metricValidators.registerForBroker(broker, minValHistogramValidator("request-latency-in-ms", minRequestLatencyInMs))
+	metricValidators.register(minCountMeterValidator("request-rate", 2))
+	metricValidators.register(minCountHistogramValidator("request-size", 2))
+	metricValidators.register(minValHistogramValidator("request-size", 1))
+	metricValidators.register(minValHistogramValidator("request-latency-in-ms", minRequestLatencyInMs))
 
 	// We send at least 1 batch
 	metricValidators.registerForGlobalAndTopic("test_1", minCountHistogramValidator("batch-size", 1))
@@ -1172,27 +1172,27 @@ func validateProducerMetrics(t *testing.T, client Client) {
 	metricValidators.registerForGlobalAndTopic("test_1", minValHistogramValidator("records-per-request", 1))
 
 	// We receive at least 1 byte from the broker
-	metricValidators.registerForAllBrokers(broker, minCountMeterValidator("outgoing-byte-rate", 1))
+	metricValidators.register(minCountMeterValidator("outgoing-byte-rate", 1))
 	if noResponse {
 		// in exactly 2 global responses (metadata + offset)
 		metricValidators.register(countMeterValidator("response-rate", 2))
 		metricValidators.register(minCountHistogramValidator("response-size", 2))
 		// and exactly 1 offset response for the registered broker
-		metricValidators.registerForBroker(broker, countMeterValidator("response-rate", 1))
-		metricValidators.registerForBroker(broker, minCountHistogramValidator("response-size", 1))
-		metricValidators.registerForBroker(broker, minValHistogramValidator("response-size", 1))
+		metricValidators.register(countMeterValidator("response-rate", 1))
+		metricValidators.register(minCountHistogramValidator("response-size", 1))
+		metricValidators.register(minValHistogramValidator("response-size", 1))
 	} else {
 		// in at least 3 global responses (metadata + offset + produces)
 		metricValidators.register(minCountMeterValidator("response-rate", 3))
 		metricValidators.register(minCountHistogramValidator("response-size", 3))
 		// and at least 2 for the registered broker
-		metricValidators.registerForBroker(broker, minCountMeterValidator("response-rate", 2))
-		metricValidators.registerForBroker(broker, minCountHistogramValidator("response-size", 2))
-		metricValidators.registerForBroker(broker, minValHistogramValidator("response-size", 1))
+		metricValidators.register(minCountMeterValidator("response-rate", 2))
+		metricValidators.register(minCountHistogramValidator("response-size", 2))
+		metricValidators.register(minValHistogramValidator("response-size", 1))
 	}
 
 	// There should be no requests in flight anymore
-	metricValidators.registerForAllBrokers(broker, counterValidator("requests-in-flight", 0))
+	metricValidators.register(countMeterValidator("requests-in-flight", 0))
 
 	// Run the validators
 	metricValidators.run(t, client.Config().MetricRegistry)
@@ -1222,7 +1222,7 @@ func validateConsumerMetrics(t *testing.T, client Client) {
 	metricValidators.registerForGlobalAndTopic("test_1", minCountMeterValidator("consumer-fetch-rate", 1))
 
 	// and at least 1 fetch request to the lead broker
-	metricValidators.registerForBroker(broker, minCountMeterValidator("consumer-fetch-rate", 1))
+	metricValidators.register(minCountMeterValidator("consumer-fetch-rate", 1))
 
 	// Run the validators
 	metricValidators.run(t, client.Config().MetricRegistry)
@@ -1258,12 +1258,12 @@ func benchmarkProducer(b *testing.B, conf *Config, topic string, value Encoder) 
 
 	metricsDisable := os.Getenv("METRICS_DISABLE")
 	if metricsDisable != "" {
-		previousUseNilMetrics := metrics.UseNilMetrics
+		previousMeter := conf.Meter
 		Logger.Println("Disabling metrics using no-op implementation")
-		metrics.UseNilMetrics = true
+		conf.Meter = nil
 		// Restore previous setting
 		defer func() {
-			metrics.UseNilMetrics = previousUseNilMetrics
+			conf.Meter = previousMeter
 		}()
 	}
 

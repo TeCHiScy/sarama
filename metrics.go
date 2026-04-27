@@ -55,6 +55,10 @@ func prefixedName(name string) string {
 }
 
 func realMetrics(meter metric.Meter) *Metrics {
+	if meter == nil {
+		return noopMetrics()
+	}
+
 	consumerFetchs, _ := meter.Int64Counter(prefixedName("consumer_fetchs_total"))
 	incomingBytes, _ := meter.Int64Counter(prefixedName("incoming_bytes_total"))
 	requests, _ := meter.Int64Counter(prefixedName("requests_total"))
@@ -95,7 +99,7 @@ func realMetrics(meter metric.Meter) *Metrics {
 }
 
 // SetupMetrics sets up the metrics for the Sarama client.
-func noopMetrics(meter metric.Meter) *Metrics {
+func noopMetrics() *Metrics {
 	return &Metrics{
 		consumerFetchs:   noop.Int64Counter{},
 		incomingBytes:    noop.Int64Counter{},

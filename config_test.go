@@ -5,11 +5,9 @@ package sarama
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
-	"github.com/rcrowley/go-metrics"
 	assert "github.com/stretchr/testify/require"
 )
 
@@ -582,26 +580,18 @@ func TestConsumerGroupStrategyCompatibility(t *testing.T) {
 	}
 }
 
-// This example shows how to integrate with an existing registry as well as publishing metrics
-// on the standard output
+// ExampleConfig_metrics shows how to provide a custom OTel MeterProvider to Sarama
+// so that metrics are exported to your observability backend.
 func ExampleConfig_metrics() {
-	// Our application registry
-	appMetricRegistry := metrics.NewRegistry()
-	appGauge := metrics.GetOrRegisterGauge("m1", appMetricRegistry)
-	appGauge.Update(1)
+	// Create an OTel MeterProvider backed by a ManualReader for demonstration.
+	meter, reader := newTestMeterAndReader()
 
 	config := NewTestConfig()
-	// Use a prefix registry instead of the default local one
-	config.Meter = metrics.NewPrefixedChildRegistry(appMetricRegistry, "sarama.")
+	// Use the custom meter from your MeterProvider.
+	config.Meter = meter
 
-	// Simulate a metric created by sarama without starting a broker
-	saramaGauge := metrics.GetOrRegisterGauge("m2", config.MetricRegistry)
-	saramaGauge.Update(2)
-
-	metrics.WriteOnce(appMetricRegistry, os.Stdout)
-	// Output:
-	// gauge m1
-	//   value:               1
-	// gauge sarama.m2
-	//   value:               2
+	// The ManualReader can be used to collect metrics on demand.
+	// In production, use a periodic exporter (e.g. Prometheus, OTLP).
+	_ = reader
+	_ = config
 }

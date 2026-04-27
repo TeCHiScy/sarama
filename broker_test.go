@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/jcmturner/gokrb5/v8/krberror"
-	"github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 func ExampleBroker() {
@@ -128,9 +128,11 @@ func TestSimpleBrokerCommunication(t *testing.T) {
 			broker := NewBroker(mb.Addr())
 			// Set the broker id in order to validate local broker metrics
 			broker.id = 0
+			meter, reader := newTestMeterAndReader()
 			conf := NewTestConfig()
 			conf.ApiVersionsRequest = false
 			conf.Version = tt.version
+			conf.Meter = meter
 			err := broker.Open(conf)
 			if err != nil {
 				t.Fatal(err)
@@ -144,7 +146,7 @@ func TestSimpleBrokerCommunication(t *testing.T) {
 			timeout := 500 * time.Millisecond
 			select {
 			case mockBrokerMetrics := <-pendingNotify:
-				validateBrokerMetrics(t, broker, mockBrokerMetrics)
+				validateBrokerMetrics(t, mockBrokerMetrics, reader)
 			case <-time.After(timeout):
 				t.Errorf("No request received for: %s after waiting for %v", tt.name, timeout)
 			}
@@ -435,7 +437,7 @@ func TestSASLOAuthBearer(t *testing.T) {
 
 			// broker executes SASL requests against mockBroker
 			broker := NewBroker(mockBroker.Addr())
-			broker.metrics = noopMetrics(otel.Meter(""))
+			broker.metrics = noopMetrics()
 
 			conf := NewTestConfig()
 			conf.Net.SASL.Mechanism = SASLTypeOAuth
@@ -536,7 +538,7 @@ func TestSASLSCRAMSHAXXX(t *testing.T) {
 			mockBroker := NewMockBroker(t, 0)
 			broker := NewBroker(mockBroker.Addr())
 			// broker executes SASL requests against mockBroker
-			broker.metrics = noopMetrics(otel.Meter(""))
+			broker.metrics = noopMetrics()
 
 			mockSASLAuthResponse := NewMockSaslAuthenticateResponse(t).SetAuthBytes([]byte(test.scramChallengeResp))
 			mockSASLHandshakeResponse := NewMockSaslHandshakeResponse(t).SetEnabledMechanisms([]string{SASLTypeSCRAMSHA256, SASLTypeSCRAMSHA512})
@@ -646,7 +648,7 @@ func TestSASLPlainAuth(t *testing.T) {
 
 			// broker executes SASL requests against mockBroker
 			broker := NewBroker(mockBroker.Addr())
-			broker.metrics = noopMetrics(otel.Meter(""))
+			broker.metrics = noopMetrics()
 
 			conf := NewTestConfig()
 			conf.Net.SASL.Mechanism = SASLTypePlaintext
@@ -716,7 +718,7 @@ func TestSASLReadTimeout(t *testing.T) {
 	})
 
 	broker := NewBroker(mockBroker.Addr())
-	broker.metrics = noopMetrics(otel.Meter(""))
+	broker.metrics = noopMetrics()
 
 	conf := NewTestConfig()
 	{
@@ -800,7 +802,7 @@ func TestGSSAPIKerberosAuth_Authorize(t *testing.T) {
 				return nil
 			})
 			broker := NewBroker(mockBroker.Addr())
-			broker.metrics = noopMetrics(otel.Meter(""))
+			broker.metrics = noopMetrics()
 
 			conf := NewTestConfig()
 			conf.Net.SASL.Version = SASLHandshakeV0
@@ -1470,35 +1472,30 @@ var brokerFailedReqTestTable = []struct {
 	},
 }
 
-func validateBrokerMetrics(t *testing.T, broker *Broker, mockBrokerMetrics brokerMetrics) {
+func validateBrokerMetrics(t *testing.T, mockBrokerMetrics brokerMetrics, reader *sdkmetric.ManualReader) {
 	metricValidators := newMetricValidators()
 	mockBrokerBytesRead := mockBrokerMetrics.bytesRead
 	mockBrokerBytesWritten := mockBrokerMetrics.bytesWritten
 
-	// Check that the number of bytes sent corresponds to what the mock broker received
-	metricValidators.registerForAllBrokers(broker, countMeterValidator("incoming-byte-rate", mockBrokerBytesWritten))
-	if mockBrokerBytesWritten == 0 {
-		// This a ProduceRequest with NoResponse
-		metricValidators.registerForAllBrokers(broker, countMeterValidator("response-rate", 0))
-		metricValidators.registerForAllBrokers(broker, countHistogramValidator("response-size", 0))
-		metricValidators.registerForAllBrokers(broker, minMaxHistogramValidator("response-size", 0, 0))
-	} else {
-		metricValidators.registerForAllBrokers(broker, countMeterValidator("response-rate", 1))
-		metricValidators.registerForAllBrokers(broker, countHistogramValidator("response-size", 1))
-		metricValidators.registerForAllBrokers(broker, minMaxHistogramValidator("response-size", mockBrokerBytesWritten, mockBrokerBytesWritten))
+	// incoming bytes and response metrics are only recorded when a response was actually received
+	if mockBrokerBytesWritten > 0 {
+		metricValidators.register(countMeterValidator("sarama_incoming_bytes_total", mockBrokerBytesWritten))
+		metricValidators.register(countMeterValidator("sarama_responses_total", 1))
+		metricValidators.register(countHistogramValidator("sarama_response_size", 1))
+		metricValidators.register(minMaxHistogramValidator("sarama_response_size", mockBrokerBytesWritten, mockBrokerBytesWritten))
 	}
 
 	// Check that the number of bytes received corresponds to what the mock broker sent
-	metricValidators.registerForAllBrokers(broker, countMeterValidator("outgoing-byte-rate", mockBrokerBytesRead))
-	metricValidators.registerForAllBrokers(broker, countMeterValidator("request-rate", 1))
-	metricValidators.registerForAllBrokers(broker, countHistogramValidator("request-size", 1))
-	metricValidators.registerForAllBrokers(broker, minMaxHistogramValidator("request-size", mockBrokerBytesRead, mockBrokerBytesRead))
+	metricValidators.register(countMeterValidator("sarama_outgoing_bytes_total", mockBrokerBytesRead))
+	metricValidators.register(countMeterValidator("sarama_requests_total", 1))
+	metricValidators.register(countHistogramValidator("sarama_request_size", 1))
+	metricValidators.register(minMaxHistogramValidator("sarama_request_size", mockBrokerBytesRead, mockBrokerBytesRead))
 
 	// Check that there is no more requests in flight
-	metricValidators.registerForAllBrokers(broker, counterValidator("requests-in-flight", 0))
+	metricValidators.register(countMeterValidator("sarama_requests_in_flight", 0))
 
 	// Run the validators
-	metricValidators.run(t, broker.conf.Meter)
+	metricValidators.run(t, reader)
 }
 
 func BenchmarkBroker_Open(b *testing.B) {
@@ -1507,7 +1504,6 @@ func BenchmarkBroker_Open(b *testing.B) {
 	broker := NewBroker(mb.Addr())
 	// Set the broker id in order to validate local broker metrics
 	broker.id = 0
-	metrics.UseNilMetrics = false
 	conf := NewTestConfig()
 	conf.Version = V1_0_0_0
 	for b.Loop() {
@@ -1524,9 +1520,10 @@ func BenchmarkBroker_No_Metrics_Open(b *testing.B) {
 	defer mb.Close()
 	broker := NewBroker(mb.Addr())
 	broker.id = 0
-	metrics.UseNilMetrics = true
 	conf := NewTestConfig()
 	conf.Version = V1_0_0_0
+	// Use noop metrics to benchmark without OTel instrumentation overhead
+	broker.metrics = noopMetrics()
 	for b.Loop() {
 		err := broker.Open(conf)
 		if err != nil {

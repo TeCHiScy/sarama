@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -2229,9 +2228,6 @@ func TestConsumerError(t *testing.T) {
 // not leak the subscriptionManager goroutine when children are already
 // shutting down or already queued for redispatch.
 func TestConsumerAbortNoGoroutineLeak(t *testing.T) {
-	metrics.UseNilMetrics = true
-	defer func() { metrics.UseNilMetrics = false }()
-
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	config := NewTestConfig()

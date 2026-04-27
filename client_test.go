@@ -788,7 +788,7 @@ func TestClientCheckBrokersHealth(t *testing.T) {
 
 		broker := NewBroker(listener.Addr().String())
 		broker.conn = conn.(*net.TCPConn)
-		broker.metricRegistry = metrics.NewRegistry()
+		broker.metrics = noopMetrics()
 		broker.opened.Store(true)
 
 		cleanup := func() {
